@@ -1,7 +1,7 @@
 {
   "name": "statsd",
   "types": ["module"],
-  "version": "0.0.1",
+  "version": "1.0.0",
   "homepage": "http://github.com/shinken-monitoring/mod-statsd",
   "author": "Frédéric Mohier",
   "description": "Export host and service performance data to Statsd",
