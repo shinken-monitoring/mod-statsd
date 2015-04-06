@@ -28,6 +28,7 @@ to brok information of the service/host perfdatas to a Statsd daemon
 """
 
 import re
+from re import compile
 import socket
 
 from shinken.basemodule import BaseModule
@@ -55,14 +56,16 @@ class Statsd_broker(BaseModule):
         BaseModule.__init__(self, modconf)
         
         self.statsd_sock = None
-        self.statsd_addr = None
+        self.statsd_addr = 0
         
-        self.statsd_host = getattr(modconf, 'statsd_host', 'localhost')
-        self.statsd_port = getattr(modconf, 'statsd_port', 8125)
+        self.statsd_host = getattr(modconf, 'host', 'localhost')
+        self.statsd_port = int(getattr(modconf, 'port', 8125))
 
+        # Specific filter to allow metrics to include '.' for Graphite
+        self.illegal_char_metric = compile(r'[^a-zA-Z0-9_.\-]')
+        
         # optional "sub-folder" in graphite to hold the data of a specific host
-        self.statsd_prefix = \
-            self.illegal_char.sub('_', getattr(modconf, 'statsd_prefix', ''))
+        self.statsd_prefix = self.illegal_char.sub('_', getattr(modconf, 'prefix', ''))
 
         self.host_dict = {}
         self.svc_dict = {}
@@ -70,18 +73,14 @@ class Statsd_broker(BaseModule):
 
 
     # Called by Broker so we can do init stuff
-    # TODO: add conf param to get pass with init
-    # Conf from arbiter!
     def init(self):
-        logger.info("[Statsd broker] Initializing the %s server connection to %s:%d", self.get_name(), str(self.statsd_host), self.statsd_port)
+        logger.info("[Statsd broker] Initializing the Statsd connection to %s:%d" % (str(self.statsd_host), self.statsd_port))
         try:
             self.statsd_addr = (socket.gethostbyname(self.statsd_host), self.statsd_port)
             self.statsd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)            
-        except IOError, exp:
+        except (socket.error, socket.gaierror), exp:
             logger.error('[Statsd broker] Cannot create statsd socket: %s' % str(exp))
             raise
-            
-        logger.info("[Statsd broker] Connection successful to  %s:%d", str(self.statsd_host), self.statsd_port)
 
     # For a perf_data like /=30MB;4899;4568;1234;0  /var=50MB;4899;4568;1234;0 /toto=
     # return ('/', '30'), ('/var', '50')
@@ -90,37 +89,40 @@ class Statsd_broker(BaseModule):
         metrics = PerfDatas(perf_data)
 
         for e in metrics:
-            name = self.illegal_char.sub('_', e.name)
+            name = self.illegal_char_metric.sub('_', e.name)
             name = self.multival.sub(r'.\1', name)
+            logger.debug("[Statsd broker] metrics: %s", e.name)
 
             # get metric value and its thresholds values if they exist
             name_value = {name: e.value}
             if e.warning and e.critical:
                 name_value[name + '_warn'] = e.warning
                 name_value[name + '_crit'] = e.critical
-            # bailout if need
+            # bailout if needed
             if name_value[name] == '':
                 continue
 
             for key, value in name_value.items():
+                logger.debug("[Statsd broker] metrics: %s - %s/%s", e.name, key, value)
                 res.append((key, value))
         return res
 
 
     # Prepare service custom vars
     def manage_initial_service_status_brok(self, b):
-        if '_GRAPHITE_POST' in b.data['customs']:
-            self.svc_dict[(b.data['host_name'], b.data['service_description'])] = b.data['customs']
+        logger.debug("[Statsd broker] Initial service status : %s/%s", b.data['host_name'], b.data['service_description'])
+        self.svc_dict[(b.data['host_name'], b.data['service_description'])] = b.data['customs']
 
 
     # Prepare host custom vars
     def manage_initial_host_status_brok(self, b):
-        if '_GRAPHITE_PRE' in b.data['customs']:
-            self.host_dict[b.data['host_name']] = b.data['customs']
+        logger.debug("[Statsd broker] Initial host status : %s", b.data['host_name'])
+        self.host_dict[b.data['host_name']] = b.data['customs']
 
 
     # A service check result brok has just arrived, we UPDATE data info with this
     def manage_service_check_result_brok(self, b):
+        logger.debug("[Statsd broker] service check result: %s/%s : %s", b.data['host_name'], b.data['service_description'], b.data['perf_data'])
         data = b.data
 
         perf_data = data['perf_data']
@@ -156,14 +158,16 @@ class Statsd_broker(BaseModule):
             packet = '%s.%s:%d|g' % (path, metric, value)
             try:
                 self.statsd_sock.sendto(packet, self.statsd_addr)
+                logger.debug('[Statsd broker] sent: %s', packet)
             except IOError, exp:
-                # logger.error('[Statsd broker] Cannot send to statsd socket: %s' % str(exp))
+                logger.error('[Statsd broker] Cannot send to statsd socket: %s' % str(exp))
                 pass
 
 
 
     # A host check result brok has just arrived, we UPDATE data info with this
     def manage_host_check_result_brok(self, b):
+        logger.debug("[Statsd broker] host check result: %s", b.data['host_name'])
         data = b.data
 
         perf_data = data['perf_data']
@@ -182,15 +186,6 @@ class Statsd_broker(BaseModule):
             # Not received initial host status
             return
         
-        desc = self.illegal_char.sub('_', data['service_description'])
-        if (data['host_name'], data['service_description']) in self.svc_dict:
-            customs_datas = self.svc_dict[(data['host_name'], data['service_description'])]
-            if '_GRAPHITE_POST' in customs_datas:
-                desc = ".".join((desc, customs_datas['_GRAPHITE_POST']))
-        else:
-            # Not received initial service status
-            return
-            
         if self.statsd_prefix:
             path = '.'.join((hname, self.statsd_prefix))
         else:
@@ -202,7 +197,8 @@ class Statsd_broker(BaseModule):
             packet = '%s.%s:%d|g' % (path, metric, value)
             try:
                 self.statsd_sock.sendto(packet, self.statsd_addr)
+                logger.debug('[Statsd broker] sent: %s', packet)
             except IOError, exp:
-                # logger.error('[Statsd broker] Cannot send to statsd socket: %s' % str(exp))
+                logger.error('[Statsd broker] Cannot send to statsd socket: %s' % str(exp))
                 pass
 
