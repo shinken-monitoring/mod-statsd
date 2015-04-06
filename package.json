@@ -1,0 +1,26 @@
+{
+  "name": "statsd",
+  "types": ["module"],
+  "version": "0.0.1",
+  "homepage": "http://github.com/shinken-monitoring/mod-statsd",
+  "author": "Frédéric Mohier",
+  "description": "Export host and service performance data to Statsd",
+  "contributors": [
+    {
+      "name": "Frédéric Mohier",
+      "email": "frederic.mohier@gmail.com"
+    }
+  ],
+  "repository": "https://github.com/shinken-monitoring/mod-statsd",
+  "keywords": [
+    "module",
+    "broker",
+	 "statsd",
+    "graphite",
+    "carbon"
+  ],
+  "dependencies": {
+    "shinken": ">=2.0"
+  },
+  "license": "AGPL"
+}

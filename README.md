@@ -1,2 +1,4 @@
-# mod-statsd
-Statsd module for Shinken
+mod-statsd
+============
+
+Shinken module for exporting data to Statsd
