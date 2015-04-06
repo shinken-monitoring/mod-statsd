@@ -18,7 +18,6 @@ Enabling Statsd module
 To use the statsd module you must declare it in your broker configuration and then restart the broker daemon.
 
 ::
-      ... 
 
       modules    	 ..., statsd
 

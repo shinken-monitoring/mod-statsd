@@ -1,4 +1,5 @@
-mod-statsd
-============
+===========================
+Statsd module
+===========================
 
-Shinken module for exporting data to Statsd
+Shinken module to send performance data metrics to a Statsd server.
