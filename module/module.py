@@ -38,7 +38,7 @@ from shinken.misc.perfdata import PerfDatas
 
 properties = {
     'daemons': ['broker'],
-    'type': 'statsd_perfdata',
+    'type': 'statsd-perfdata',
     'external': False,
 }
 
