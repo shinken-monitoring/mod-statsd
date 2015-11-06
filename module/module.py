@@ -69,22 +69,22 @@ class Statsd_broker(BaseModule):
         logger.info("[Statsd] Configuration - host/port: %s:%d", self.host, self.port)
 
         # service name to use for host check
-        self.hostcheck = getattr(modconf, 'hostcheck', None)
+        self.hostcheck = getattr(modconf, 'hostcheck', '')
 
-        # optional "sub-folder" in graphite to hold the data of a specific host
+        # optional "sub-folder" in graphite to signal shinken data source
         self.graphite_data_source = self.illegal_char_metric.sub('_', getattr(modconf, 'graphite_data_source', ''))
         logger.info("[Statsd] Configuration - Graphite data source: %s", self.graphite_data_source)
 
         # optional perfdatas to be filtered
         self.filtered_metrics = {}
         filters = getattr(modconf, 'filter', [])
-        if type(filters) is 'str':
+        if isinstance(filters, str) or isinstance(filters, unicode):
             filters = [filters]
         for filter in filters:
             try:
                 filtered_service, filtered_metric = filter.split(':')
                 self.filtered_metrics[filtered_service] = []
-                if self.filtered_metrics[filtered_service]:
+                if filtered_metric:
                     self.filtered_metrics[filtered_service] = filtered_metric.split(',')
             except:
                 logger.warning("[Statsd] Configuration - ignoring badly declared filtered metric: %s", filter)
@@ -92,6 +92,60 @@ class Statsd_broker(BaseModule):
 
         for service in self.filtered_metrics:
             logger.info("[Statsd] Configuration - Filtered metrics: %s - %s", service, self.filtered_metrics[service])
+
+        # optional perfdatas types: timers
+        self.timers = {}
+        filters = getattr(modconf, 'timer', [])
+        if isinstance(filters, str) or isinstance(filters, unicode):
+            filters = [filters]
+        for filter in filters:
+            try:
+                filtered_service, filtered_metric = filter.split(':')
+                self.timers[filtered_service] = []
+                if filtered_metric:
+                    self.timers[filtered_service] = filtered_metric.split(',')
+            except:
+                logger.warning("[Statsd] Configuration - ignoring badly declared filter: %s", filter)
+                pass
+
+        for service in self.timers:
+            logger.info("[Statsd] Configuration - Timer metrics: %s - %s", service, self.timers[service])
+
+        # optional perfdatas types: counters
+        self.counters = {}
+        filters = getattr(modconf, 'counter', [])
+        if isinstance(filters, str) or isinstance(filters, unicode):
+            filters = [filters]
+        for filter in filters:
+            try:
+                filtered_service, filtered_metric = filter.split(':')
+                self.counters[filtered_service] = []
+                if filtered_metric:
+                    self.counters[filtered_service] = filtered_metric.split(',')
+            except:
+                logger.warning("[Statsd] Configuration - ignoring badly declared filter: %s", filter)
+                pass
+
+        for service in self.counters:
+            logger.info("[Statsd] Configuration - Counter metrics: %s - %s", service, self.counters[service])
+
+        # optional perfdatas types: meters
+        self.meters = {}
+        filters = getattr(modconf, 'meter', [])
+        if isinstance(filters, str) or isinstance(filters, unicode):
+            filters = [filters]
+        for filter in filters:
+            try:
+                filtered_service, filtered_metric = filter.split(':')
+                self.meters[filtered_service] = []
+                if filtered_metric:
+                    self.meters[filtered_service] = filtered_metric.split(',')
+            except:
+                logger.warning("[Statsd] Configuration - ignoring badly declared filter: %s", filter)
+                pass
+
+        for service in self.meters:
+            logger.info("[Statsd] Configuration - Meter metrics: %s - %s", service, self.meters[service])
 
         # Send warning, critical, min, max
         self.send_warning = bool(getattr(modconf, 'send_warning', False))
@@ -113,8 +167,6 @@ class Statsd_broker(BaseModule):
             logger.error('[Statsd] Cannot create statsd socket: %s' % str(exp))
             raise
 
-    # For a perf_data like /=30MB;4899;4568;1234;0  /var=50MB;4899;4568;1234;0 /toto=
-    # return ('/', '30'), ('/var', '50')
     def get_metric_and_value(self, service, perf_data):
         result = []
         metrics = PerfDatas(perf_data)
@@ -232,11 +284,23 @@ class Statsd_broker(BaseModule):
 
         # Send metrics values to Statsd
         for (metric, value) in couples:
+            # Metric type
+            metric_type = 'g'
+            if service_description in self.timers:
+                if metric in self.timers[service_description]:
+                    metric_type = 'ms'
+            elif service_description in self.counters:
+                if metric in self.counters[service_description]:
+                    metric_type = 'c'
+            elif service_description in self.meters:
+                if metric in self.meters[service_description]:
+                    metric_type = 'm'
+
             # Send metrics as gauges ... probably should be refined to allow counts, sets and delays ?
-            packet = '%s.%s:%d|g' % (path, metric, value)
+            packet = '%s.%s:%d|%s' % (path, metric, value, metric_type)
             try:
                 self.statsd_sock.sendto(packet, self.statsd_addr)
-                logger.info('[Statsd] sent: %s', packet)
+                logger.debug('[Statsd] sent: %s', packet)
             except IOError, exp:
                 logger.error('[Statsd] Cannot send to statsd socket: %s' % str(exp))
                 pass
@@ -267,6 +331,9 @@ class Statsd_broker(BaseModule):
         if '_GRAPHITE_PRE' in self.hosts_cache[host_name]:
             hname = ".".join((self.hosts_cache[host_name]['_GRAPHITE_PRE'], hname))
 
+        if self.hostcheck:
+            hname = '.'.join((hname, self.hostcheck))
+
         # Graphite data source
         if self.graphite_data_source:
             path = '.'.join((hname, self.graphite_data_source))
@@ -279,7 +346,7 @@ class Statsd_broker(BaseModule):
             packet = '%s.%s:%d|g' % (path, metric, value)
             try:
                 self.statsd_sock.sendto(packet, self.statsd_addr)
-                logger.info('[Statsd] sent: %s', packet)
+                logger.debug('[Statsd] sent: %s', packet)
             except IOError, exp:
                 logger.error('[Statsd] Cannot send to statsd socket: %s' % str(exp))
                 pass
