@@ -1,5 +1,4 @@
 #!/usr/bin/python
-
 # -*- coding: utf-8 -*-
 
 # Copyright (C) 2009-2012:
@@ -38,14 +37,14 @@ from shinken.misc.perfdata import PerfDatas
 
 properties = {
     'daemons': ['broker'],
-    'type': 'statsd-perfdata',
-    'external': False,
+    'type': 'statsd_perfdata',
+    'external': True,
 }
 
 
 # Called by the plugin manager to get a broker
 def get_instance(mod_conf):
-    logger.info("[Statsd broker] Get a Statsd data module for plugin %s", mod_conf.get_name())
+    logger.info("[Statsd] Get a Statsd data module for plugin %s", mod_conf.get_name())
     instance = Statsd_broker(mod_conf)
     return instance
 
@@ -55,101 +54,179 @@ def get_instance(mod_conf):
 class Statsd_broker(BaseModule):
     def __init__(self, modconf):
         BaseModule.__init__(self, modconf)
-        
-        self.statsd_sock = None
-        self.statsd_addr = 0
-        
-        self.statsd_host = getattr(modconf, 'host', 'localhost')
-        self.statsd_port = int(getattr(modconf, 'port', 8125))
+
+        self.hosts_cache = {}
+        self.services_cache = {}
+
+        # Separate perfdata multiple values
+        self.multival = compile(r'_(\d+)$')
 
         # Specific filter to allow metrics to include '.' for Graphite
         self.illegal_char_metric = compile(r'[^a-zA-Z0-9_.\-]')
-        
+
+        self.host = getattr(modconf, 'host', 'localhost')
+        self.port = int(getattr(modconf, 'port', '8125'))
+        logger.info("[Statsd] Configuration - host/port: %s:%d", self.host, self.port)
+
+        # service name to use for host check
+        self.hostcheck = getattr(modconf, 'hostcheck', None)
+
         # optional "sub-folder" in graphite to hold the data of a specific host
-        self.statsd_prefix = self.illegal_char.sub('_', getattr(modconf, 'prefix', ''))
+        self.graphite_data_source = self.illegal_char_metric.sub('_', getattr(modconf, 'graphite_data_source', ''))
+        logger.info("[Statsd] Configuration - Graphite data source: %s", self.graphite_data_source)
 
-        self.host_dict = {}
-        self.svc_dict = {}
-        self.multival = re.compile(r'_(\d+)$')
+        # optional perfdatas to be filtered
+        self.filtered_metrics = {}
+        filters = getattr(modconf, 'filter', [])
+        if type(filters) is 'str':
+            filters = [filters]
+        for filter in filters:
+            try:
+                filtered_service, filtered_metric = filter.split(':')
+                self.filtered_metrics[filtered_service] = []
+                if self.filtered_metrics[filtered_service]:
+                    self.filtered_metrics[filtered_service] = filtered_metric.split(',')
+            except:
+                logger.warning("[Statsd] Configuration - ignoring badly declared filtered metric: %s", filter)
+                pass
 
+        for service in self.filtered_metrics:
+            logger.info("[Statsd] Configuration - Filtered metrics: %s - %s", service, self.filtered_metrics[service])
+
+        # Send warning, critical, min, max
+        self.send_warning = bool(getattr(modconf, 'send_warning', False))
+        logger.info("[Statsd] Configuration - send warning metrics: %d", self.send_warning)
+        self.send_critical = bool(getattr(modconf, 'send_critical', False))
+        logger.info("[Statsd] Configuration - send critical metrics: %d", self.send_critical)
+        self.send_min = bool(getattr(modconf, 'send_min', False))
+        logger.info("[Statsd] Configuration - send min metrics: %d", self.send_min)
+        self.send_max = bool(getattr(modconf, 'send_max', False))
+        logger.info("[Statsd] Configuration - send max metrics: %d", self.send_max)
 
     # Called by Broker so we can do init stuff
     def init(self):
-        logger.info("[Statsd broker] Initializing the Statsd connection to %s:%d" % (str(self.statsd_host), self.statsd_port))
+        logger.info("[Statsd] initializing connection to %s:%d ...", str(self.host), self.port)
         try:
-            self.statsd_addr = (socket.gethostbyname(self.statsd_host), self.statsd_port)
-            self.statsd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)            
+            self.statsd_addr = (socket.gethostbyname(self.host), self.port)
+            self.statsd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         except (socket.error, socket.gaierror), exp:
-            logger.error('[Statsd broker] Cannot create statsd socket: %s' % str(exp))
+            logger.error('[Statsd] Cannot create statsd socket: %s' % str(exp))
             raise
 
     # For a perf_data like /=30MB;4899;4568;1234;0  /var=50MB;4899;4568;1234;0 /toto=
     # return ('/', '30'), ('/var', '50')
-    def get_metric_and_value(self, perf_data):
-        res = []
+    def get_metric_and_value(self, service, perf_data):
+        result = []
         metrics = PerfDatas(perf_data)
 
         for e in metrics:
+            logger.debug("[Statsd] service: %s, metric: %s", e.name)
+            if service in self.filtered_metrics:
+                if e.name in self.filtered_metrics[service]:
+                    logger.debug("[Statsd] Ignore metric '%s' for filtered service: %s", e.name, service)
+                    continue
+
             name = self.illegal_char_metric.sub('_', e.name)
             name = self.multival.sub(r'.\1', name)
-            logger.debug("[Statsd broker] metrics: %s", e.name)
 
             # get metric value and its thresholds values if they exist
             name_value = {name: e.value}
-            if e.warning and e.critical:
-                name_value[name + '_warn'] = e.warning
-                name_value[name + '_crit'] = e.critical
-            # bailout if needed
+            # bailout if no value
             if name_value[name] == '':
                 continue
 
+            # Get or ignore extra values depending upon module configuration
+            if e.warning and self.send_warning:
+                name_value[name + '_warn'] = e.warning
+
+            if e.critical and self.send_critical:
+                name_value[name + '_crit'] = e.critical
+
+            if e.min and self.send_min:
+                name_value[name + '_min'] = e.min
+
+            if e.max and self.send_max:
+                name_value[name + '_max'] = e.max
+
             for key, value in name_value.items():
-                logger.debug("[Statsd broker] metrics: %s - %s/%s", e.name, key, value)
-                res.append((key, value))
-        return res
+                result.append((key, value))
 
+        return result
 
-    # Prepare service custom vars
+    # Prepare service cache
     def manage_initial_service_status_brok(self, b):
-        logger.debug("[Statsd broker] Initial service status : %s/%s", b.data['host_name'], b.data['service_description'])
-        self.svc_dict[(b.data['host_name'], b.data['service_description'])] = b.data['customs']
+        host_name = b.data['host_name']
+        service_description = b.data['service_description']
+        service_id = host_name+"/"+service_description
+        logger.info("[Statsd] got initial service status: %s", service_id)
 
+        if host_name not in self.hosts_cache:
+            logger.error("[Statsd] initial service status, host is unknown: %s.", service_id)
+            return
 
-    # Prepare host custom vars
+        self.services_cache[service_id] = {}
+        if '_GRAPHITE_POST' in b.data['customs']:
+            self.services_cache[service_id]['_GRAPHITE_POST'] = b.data['customs']['_GRAPHITE_POST']
+
+        logger.debug("[Statsd] initial service status received: %s", service_id)
+
+    # Prepare host cache
     def manage_initial_host_status_brok(self, b):
-        logger.debug("[Statsd broker] Initial host status : %s", b.data['host_name'])
-        self.host_dict[b.data['host_name']] = b.data['customs']
+        host_name = b.data['host_name']
+        logger.info("[Statsd] got initial host status: %s", host_name)
 
+        self.hosts_cache[host_name] = {}
+        if '_GRAPHITE_PRE' in b.data['customs']:
+            self.hosts_cache[host_name]['_GRAPHITE_PRE'] = b.data['customs']['_GRAPHITE_PRE']
+        if '_GRAPHITE_GROUP' in b.data['customs']:
+            self.hosts_cache[host_name]['_GRAPHITE_GROUP'] = b.data['customs']['_GRAPHITE_GROUP']
 
-    # A service check result brok has just arrived, we UPDATE data info with this
+        logger.debug("[Statsd] initial host status received: %s", host_name)
+
+    # A service check result brok has just arrived ...
     def manage_service_check_result_brok(self, b):
-        logger.debug("[Statsd broker] service check result: %s/%s : %s", b.data['host_name'], b.data['service_description'], b.data['perf_data'])
-        data = b.data
+        host_name = b.data['host_name']
+        service_description = b.data['service_description']
+        service_id = host_name+"/"+service_description
+        logger.debug("[Statsd] service check result: %s", service_id)
 
-        perf_data = data['perf_data']
-        couples = self.get_metric_and_value(perf_data)
+        # If host and service initial status brokes have not been received, ignore ...
+        if host_name not in self.hosts_cache:
+            logger.warning("[Statsd] received service check result for an unknown host: %s", service_id)
+            return
+        if service_id not in self.services_cache:
+            logger.warning("[Statsd] received service check result for an unknown service: %s", service_id)
+            return
+
+        if service_description in self.filtered_metrics:
+            if len(self.filtered_metrics[service_description]) == 0:
+                logger.debug("[Statsd] Ignore service '%s' metrics", service_description)
+                return
+
+        # Decode received metrics
+        couples = self.get_metric_and_value(service_description, b.data['perf_data'])
 
         # If no values, we can exit now
         if len(couples) == 0:
+            logger.debug("[Statsd] no metrics to send ...")
             return
 
-        hname = self.illegal_char.sub('_', data['host_name'])
-        if data['host_name'] in self.host_dict:
-            customs_datas = self.host_dict[data['host_name']]
-            if '_GRAPHITE_PRE' in customs_datas:
-                hname = ".".join((customs_datas['_GRAPHITE_PRE'], hname))
+        # Custom hosts variables
+        hname = self.illegal_char.sub('_', host_name)
+        if '_GRAPHITE_GROUP' in self.hosts_cache[host_name]:
+            hname = ".".join((self.hosts_cache[host_name]['_GRAPHITE_GROUP'], hname))
 
-        desc = self.illegal_char.sub('_', data['service_description'])
-        if (data['host_name'], data['service_description']) in self.svc_dict:
-            customs_datas = self.svc_dict[(data['host_name'], data['service_description'])]
-            if '_GRAPHITE_POST' in customs_datas:
-                desc = ".".join((desc, customs_datas['_GRAPHITE_POST']))
-        else:
-            # Not received initial service status
-            return
+        if '_GRAPHITE_PRE' in self.hosts_cache[host_name]:
+            hname = ".".join((self.hosts_cache[host_name]['_GRAPHITE_PRE'], hname))
 
-        if self.statsd_prefix:
-            path = '.'.join((hname, self.statsd_prefix, desc))
+        # Custom services variables
+        desc = self.illegal_char.sub('_', service_description)
+        if '_GRAPHITE_POST' in self.services_cache[service_id]:
+            desc = ".".join((desc, self.services_cache[service_id]['_GRAPHITE_POST']))
+
+        # Graphite data source
+        if self.graphite_data_source:
+            path = '.'.join((hname, self.graphite_data_source, desc))
         else:
             path = '.'.join((hname, desc))
 
@@ -159,36 +236,40 @@ class Statsd_broker(BaseModule):
             packet = '%s.%s:%d|g' % (path, metric, value)
             try:
                 self.statsd_sock.sendto(packet, self.statsd_addr)
-                logger.debug('[Statsd broker] sent: %s', packet)
+                logger.info('[Statsd] sent: %s', packet)
             except IOError, exp:
-                logger.error('[Statsd broker] Cannot send to statsd socket: %s' % str(exp))
+                logger.error('[Statsd] Cannot send to statsd socket: %s' % str(exp))
                 pass
-
-
 
     # A host check result brok has just arrived, we UPDATE data info with this
     def manage_host_check_result_brok(self, b):
-        logger.debug("[Statsd broker] host check result: %s", b.data['host_name'])
-        data = b.data
+        host_name = b.data['host_name']
+        logger.debug("[Statsd] host check result: %s", host_name)
 
-        perf_data = data['perf_data']
-        couples = self.get_metric_and_value(perf_data)
+        # If host initial status brok has not been received, ignore ...
+        if host_name not in self.hosts_cache:
+            logger.warning("[Statsd] received service check result for an unknown host: %s", host_name)
+            return
+
+        # Decode received metrics
+        couples = self.get_metric_and_value('host_check', b.data['perf_data'])
 
         # If no values, we can exit now
         if len(couples) == 0:
+            logger.debug("[Statsd] no metrics to send ...")
             return
 
-        hname = self.illegal_char.sub('_', data['host_name'])
-        if data['host_name'] in self.host_dict:
-            customs_datas = self.host_dict[data['host_name']]
-            if '_GRAPHITE_PRE' in customs_datas:
-                hname = ".".join((customs_datas['_GRAPHITE_PRE'], hname))
-        else:
-            # Not received initial host status
-            return
-        
-        if self.statsd_prefix:
-            path = '.'.join((hname, self.statsd_prefix))
+        # Custom hosts variables
+        hname = self.illegal_char.sub('_', host_name)
+        if '_GRAPHITE_GROUP' in self.hosts_cache[host_name]:
+            hname = ".".join((self.hosts_cache[host_name]['_GRAPHITE_GROUP'], hname))
+
+        if '_GRAPHITE_PRE' in self.hosts_cache[host_name]:
+            hname = ".".join((self.hosts_cache[host_name]['_GRAPHITE_PRE'], hname))
+
+        # Graphite data source
+        if self.graphite_data_source:
+            path = '.'.join((hname, self.graphite_data_source))
         else:
             path = hname
 
@@ -198,8 +279,16 @@ class Statsd_broker(BaseModule):
             packet = '%s.%s:%d|g' % (path, metric, value)
             try:
                 self.statsd_sock.sendto(packet, self.statsd_addr)
-                logger.debug('[Statsd broker] sent: %s', packet)
+                logger.info('[Statsd] sent: %s', packet)
             except IOError, exp:
-                logger.error('[Statsd broker] Cannot send to statsd socket: %s' % str(exp))
+                logger.error('[Statsd] Cannot send to statsd socket: %s' % str(exp))
                 pass
 
+    def main(self):
+        self.set_proctitle(self.name)
+        self.set_exit_handler()
+        while not self.interrupted:
+            l = self.to_q.get()
+            for b in l:
+                b.prepare()
+                self.manage_brok(b)
